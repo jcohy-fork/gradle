@@ -26,6 +26,7 @@ import org.gradle.api.internal.file.FileCollectionStructureVisitor;
 import org.gradle.api.internal.tasks.TaskDependencyResolveContext;
 import org.gradle.internal.Describables;
 import org.gradle.internal.DisplayName;
+import org.gradle.internal.Try;
 import org.gradle.internal.operations.BuildOperationQueue;
 import org.gradle.internal.operations.RunnableBuildOperation;
 
@@ -40,7 +41,7 @@ import java.util.List;
 public class TransformedProjectArtifactSet implements ResolvedArtifactSet, FileCollectionInternal.Source {
     private final ComponentIdentifier componentIdentifier;
     private final ImmutableAttributes targetAttributes;
-    private final Collection<TransformationNode> scheduledNodes;
+    private final Collection<TransformationNode> transformedArtifacts;
 
     public TransformedProjectArtifactSet(
         ComponentIdentifier componentIdentifier,
@@ -52,11 +53,25 @@ public class TransformedProjectArtifactSet implements ResolvedArtifactSet, FileC
     ) {
         this.componentIdentifier = componentIdentifier;
         this.targetAttributes = targetAttributes;
-        this.scheduledNodes = transformationNodeRegistry.getOrCreate(delegate, transformation, dependenciesResolverFactory.create(componentIdentifier));
+        this.transformedArtifacts = transformationNodeRegistry.getOrCreate(delegate, transformation, dependenciesResolverFactory.create(componentIdentifier));
+    }
+
+    public TransformedProjectArtifactSet(ComponentIdentifier componentIdentifier, ImmutableAttributes targetAttributes, Collection<TransformationNode> transformedArtifacts) {
+        this.componentIdentifier = componentIdentifier;
+        this.targetAttributes = targetAttributes;
+        this.transformedArtifacts = transformedArtifacts;
     }
 
     public ComponentIdentifier getOwnerId() {
         return componentIdentifier;
+    }
+
+    public ImmutableAttributes getTargetAttributes() {
+        return targetAttributes;
+    }
+
+    public Collection<TransformationNode> getTransformedArtifacts() {
+        return transformedArtifacts;
     }
 
     @Override
@@ -66,11 +81,18 @@ public class TransformedProjectArtifactSet implements ResolvedArtifactSet, FileC
             return visitor -> visitor.endVisitCollection(this);
         }
 
-        List<ResolvableArtifact> result = new ArrayList<>(scheduledNodes.size());
-        for (TransformationNode node : scheduledNodes) {
+        List<ResolvableArtifact> result = new ArrayList<>(transformedArtifacts.size());
+        List<Throwable> failures = new ArrayList<>(1);
+        for (TransformationNode node : transformedArtifacts) {
             node.executeIfNotAlready();
-            for (File file : node.getTransformedSubject().get().getFiles()) {
-                result.add(node.getInputArtifacts().transformedTo(file));
+            Try<TransformationSubject> transformedSubject = node.getTransformedSubject();
+            if (transformedSubject.isSuccessful()) {
+                for (File file : transformedSubject.get().getFiles()) {
+                    result.add(node.getInputArtifacts().transformedTo(file));
+                }
+            } else {
+                Throwable failure = transformedSubject.getFailure().get();
+                failures.add(new TransformException(String.format("Failed to transform %s to match attributes %s.", node.getInputArtifacts().getDisplayName(), targetAttributes), failure));
             }
         }
         return visitor -> {
@@ -78,19 +100,18 @@ public class TransformedProjectArtifactSet implements ResolvedArtifactSet, FileC
             for (ResolvableArtifact artifact : result) {
                 visitor.visitArtifact(displayName, targetAttributes, artifact);
             }
+            for (Throwable failure : failures) {
+                visitor.visitFailure(failure);
+            }
             visitor.endVisitCollection(this);
         };
     }
 
     @Override
     public void visitDependencies(TaskDependencyResolveContext context) {
-        if (!scheduledNodes.isEmpty()) {
-            context.add(new DefaultTransformationDependency(scheduledNodes));
+        if (!transformedArtifacts.isEmpty()) {
+            context.add(new DefaultTransformationDependency(transformedArtifacts));
         }
-    }
-
-    public Collection<TransformationNode> getScheduledNodes() {
-        return scheduledNodes;
     }
 
     @Override

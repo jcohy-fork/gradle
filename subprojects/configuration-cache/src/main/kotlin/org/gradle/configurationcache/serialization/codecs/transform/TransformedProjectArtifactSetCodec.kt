@@ -16,8 +16,35 @@
 
 package org.gradle.configurationcache.serialization.codecs.transform
 
+import org.gradle.api.artifacts.component.ComponentIdentifier
+import org.gradle.api.internal.artifacts.transform.TransformationNode
 import org.gradle.api.internal.artifacts.transform.TransformedProjectArtifactSet
+import org.gradle.api.internal.attributes.ImmutableAttributes
+import org.gradle.configurationcache.extensions.uncheckedCast
 import org.gradle.configurationcache.serialization.Codec
+import org.gradle.configurationcache.serialization.ReadContext
+import org.gradle.configurationcache.serialization.WriteContext
+import org.gradle.configurationcache.serialization.decodePreservingSharedIdentity
+import org.gradle.configurationcache.serialization.encodePreservingSharedIdentityOf
+import org.gradle.configurationcache.serialization.readList
+import org.gradle.configurationcache.serialization.readNonNull
+import org.gradle.configurationcache.serialization.writeCollection
 
-class TransformedProjectArtifactSetCodec: Codec<TransformedProjectArtifactSet> {
+class TransformedProjectArtifactSetCodec : Codec<TransformedProjectArtifactSet> {
+    override suspend fun WriteContext.encode(value: TransformedProjectArtifactSet) {
+        encodePreservingSharedIdentityOf(value) {
+            write(value.ownerId)
+            write(value.targetAttributes)
+            writeCollection(value.transformedArtifacts)
+        }
+    }
+
+    override suspend fun ReadContext.decode(): TransformedProjectArtifactSet {
+        return decodePreservingSharedIdentity {
+            val ownerId = readNonNull<ComponentIdentifier>()
+            val targetAttributes = readNonNull<ImmutableAttributes>()
+            val nodes: List<TransformationNode> = readList().uncheckedCast()
+            TransformedProjectArtifactSet(ownerId, targetAttributes, nodes)
+        }
+    }
 }
