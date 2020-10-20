@@ -16,35 +16,70 @@
 
 package org.gradle.api.internal.artifacts.transform;
 
+import org.gradle.api.Action;
 import org.gradle.api.artifacts.component.ComponentIdentifier;
+import org.gradle.api.internal.artifacts.ivyservice.resolveengine.artifact.ResolvableArtifact;
 import org.gradle.api.internal.artifacts.ivyservice.resolveengine.artifact.ResolvedArtifactSet;
 import org.gradle.api.internal.attributes.ImmutableAttributes;
+import org.gradle.api.internal.file.FileCollectionInternal;
+import org.gradle.api.internal.file.FileCollectionStructureVisitor;
 import org.gradle.api.internal.tasks.TaskDependencyResolveContext;
+import org.gradle.internal.Describables;
+import org.gradle.internal.DisplayName;
+import org.gradle.internal.operations.BuildOperationQueue;
+import org.gradle.internal.operations.RunnableBuildOperation;
 
+import java.io.File;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 
 /**
  * An artifact set containing transformed project artifacts.
  */
-public class TransformedProjectArtifactSet extends AbstractTransformedArtifactSet {
+public class TransformedProjectArtifactSet implements ResolvedArtifactSet, FileCollectionInternal.Source {
     private final ComponentIdentifier componentIdentifier;
+    private final ImmutableAttributes targetAttributes;
     private final Collection<TransformationNode> scheduledNodes;
 
     public TransformedProjectArtifactSet(
         ComponentIdentifier componentIdentifier,
         ResolvedArtifactSet delegate,
-        ImmutableAttributes target,
+        ImmutableAttributes targetAttributes,
         Transformation transformation,
         ExtraExecutionGraphDependenciesResolverFactory dependenciesResolverFactory,
         TransformationNodeRegistry transformationNodeRegistry
     ) {
-        super(componentIdentifier, delegate, target, transformation, dependenciesResolverFactory, transformationNodeRegistry);
         this.componentIdentifier = componentIdentifier;
-        this.scheduledNodes = transformationNodeRegistry.getOrCreate(delegate, transformation, getDependenciesResolver());
+        this.targetAttributes = targetAttributes;
+        this.scheduledNodes = transformationNodeRegistry.getOrCreate(delegate, transformation, dependenciesResolverFactory.create(componentIdentifier));
     }
 
     public ComponentIdentifier getOwnerId() {
         return componentIdentifier;
+    }
+
+    @Override
+    public Completion startVisit(BuildOperationQueue<RunnableBuildOperation> actions, AsyncArtifactListener listener) {
+        FileCollectionStructureVisitor.VisitType visitType = listener.prepareForVisit(this);
+        if (visitType == FileCollectionStructureVisitor.VisitType.NoContents) {
+            return visitor -> visitor.endVisitCollection(this);
+        }
+
+        List<ResolvableArtifact> result = new ArrayList<>(scheduledNodes.size());
+        for (TransformationNode node : scheduledNodes) {
+            node.executeIfNotAlready();
+            for (File file : node.getTransformedSubject().get().getFiles()) {
+                result.add(node.getInputArtifacts().transformedTo(file));
+            }
+        }
+        return visitor -> {
+            DisplayName displayName = Describables.of(componentIdentifier);
+            for (ResolvableArtifact artifact : result) {
+                visitor.visitArtifact(displayName, targetAttributes, artifact);
+            }
+            visitor.endVisitCollection(this);
+        };
     }
 
     @Override
@@ -56,5 +91,15 @@ public class TransformedProjectArtifactSet extends AbstractTransformedArtifactSe
 
     public Collection<TransformationNode> getScheduledNodes() {
         return scheduledNodes;
+    }
+
+    @Override
+    public void visitLocalArtifacts(LocalArtifactVisitor visitor) {
+        throw new UnsupportedOperationException("Should not be called.");
+    }
+
+    @Override
+    public void visitExternalArtifacts(Action<ResolvableArtifact> visitor) {
+        throw new UnsupportedOperationException("Should not be called.");
     }
 }
